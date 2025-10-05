@@ -2,8 +2,11 @@
 /**
  * High-Speed Optimized Planfix Task Downloader with Parallel Processing
  * Features: Multi-threading, connection pooling, concurrent requests, filtering
- * Usage: php planfix_task_downloader.php [batch_number] [threads] [filter_preset]
- * Example: php planfix_task_downloader.php 1 8 recent
+ * Usage: php planfix_task_downloader.php [batch_number] [threads] [filter]
+ * - [filter] can be a preset name (e.g. "recent") OR a numeric Planfix saved filter ID
+ * - You can also pass web params: ?batch=1&threads=8&filter=268518 (or &filterId=268518)
+ * Example (CLI): php planfix_task_downloader.php 1 8 268518
+ * Example (Web):  ?batch=1&threads=8&filter=268518
  */
 
 // Configuration
@@ -771,7 +774,14 @@ try {
         // Web execution
         $batchNumber = isset($_GET['batch']) ? (int)$_GET['batch'] : 1;
         $threads = isset($_GET['threads']) ? max(1, min(20, (int)$_GET['threads'])) : $defaultThreads;
-        $filterPreset = isset($_GET['filter']) ? $_GET['filter'] : 'all';
+        // Accept either preset names (e.g., "recent") or numeric/saved filter IDs
+        // Also accept filterId/filter_id explicitly
+        $filterPreset = isset($_GET['filter']) ? trim((string)$_GET['filter']) : 'all';
+        if (isset($_GET['filterId']) && is_numeric($_GET['filterId'])) {
+            $filterPreset = (string)$_GET['filterId'];
+        } elseif (isset($_GET['filter_id']) && is_numeric($_GET['filter_id'])) {
+            $filterPreset = (string)$_GET['filter_id'];
+        }
 
         set_time_limit(0);
         ignore_user_abort(true);
@@ -794,11 +804,29 @@ try {
         exit(1);
     }
 
-    // Get filters from preset
-    $filters = $filterPresets[$filterPreset] ?? [];
-    if (!isset($filterPresets[$filterPreset])) {
-        $error = "Invalid filter preset: $filterPreset. Available: " . implode(', ', array_keys($filterPresets));
+    // Resolve filters from input (support preset names and numeric saved filter IDs)
+    $filters = [];
+    $resolvedFilterDescription = '';
+
+    if (is_numeric($filterPreset)) {
+        // Direct numeric ID (e.g., 268518)
+        $filters = ['filter_id' => (int)$filterPreset];
+        $resolvedFilterDescription = 'saved_filter_id:' . (int)$filterPreset;
+    } elseif (preg_match('/^filter_(\d+)$/', (string)$filterPreset, $m)) {
+        // Backwards-compatible: filter_268518
+        $filters = ['filter_id' => (int)$m[1]];
+        $resolvedFilterDescription = 'saved_filter_id:' . (int)$m[1];
+    } elseif (isset($filterPresets[$filterPreset])) {
+        // Named preset
+        $filters = $filterPresets[$filterPreset];
+        $resolvedFilterDescription = 'preset:' . $filterPreset;
+    } else {
+        $error = "Invalid filter value: $filterPreset. Pass a preset name (" . implode(', ', array_keys($filterPresets)) . ") or a numeric saved filter ID (e.g., 268518).";
         file_put_contents($downloadFolder . '/error.log', date('Y-m-d H:i:s') . " - $error\n", FILE_APPEND | LOCK_EX);
+        if (php_sapi_name() !== 'cli') {
+            header('Content-Type: application/json');
+            echo json_encode(['error' => $error]);
+        }
         exit(1);
     }
 
@@ -819,7 +847,8 @@ try {
     $statusData = [
         'batch' => $batchNumber,
         'threads' => $threads,
-        'filter_preset' => $filterPreset,
+        'filter_input' => $filterPreset,
+        'filter_resolved' => $resolvedFilterDescription,
         'status' => 'completed',
         'completed_at' => date('Y-m-d H:i:s'),
         'stats' => $downloader->getStats(),
